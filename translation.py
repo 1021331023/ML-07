@@ -1,7 +1,4 @@
-from __future__ import unicode_literals, print_function, division
-from io import open
 import unicodedata
-import string
 import re
 import random
 import jieba
@@ -10,40 +7,73 @@ import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
 
-# import matplotlib.font_manager as fm
-# myfont = fm.FontProperties(fname='C:\font\simhei.ttf')
-# from pylab import mpl
-# mpl.rcParams['font.sans-serif'] = ['SimHei']  #中文显示问题
+from tqdm import tqdm
+from tensorboardX import SummaryWriter
+from nltk.translate.bleu_score import sentence_bleu
+import os
+
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import numpy as np
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"use {device}")
 
-# 数据预处理的主要步骤包括：
-# 1. 读取txt文件，并按行分割，再把每一行分割成一个pair(Eng,Chinese)
+# 每个pair中，制作出中文和英文词典
+BOS_token = 0
+EOS_token = 1
+
+# 为便于训练，这里选择部分数据
+MAX_LENGTH = 20  # 限制句子长度
+eng_prefixes = (
+    "i am ", "i'm ", 
+    "he is", "he's ", 
+    "she is", "she's ", 
+    "you are", "you're ", 
+    "we are", "we're ", 
+    "they are", "they're "
+) # 限制句子开头
+
+# eng_prefixes = (
+#     "a", "b", "c", "d", "e", "f",
+#     "g", "h", "i", "j", "k", "l", 
+#     "m", "n", "o", "p", "q", "r",
+#     "s", "t", "u", "v", "w", "x",
+#     "y", "z", '"'
+#     ) # 不限制句子开头
+
+
+### 数据预处理的主要步骤包括：
+# 1. 读取txt文件，并按行分割，再把每一行分割成一个pair(Eng, Chinese)
 # 2. 过滤并处理文本信息
 # 3. 从每个pair中，制作出中文词典和英文词典
 # 4. 构建训练集
 
-#每个pair中，制作出中文和英文词典
-SOS_token = 0
-EOS_token = 1
 
+### 过滤并处理文本信息
+# 为了便于数据处理，把Unicode字符串转换为ASCII编码（同时过滤掉'Mn'容易报错的数据）
+def unicodeToAscii(s):
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', s)
+        if unicodedata.category(c) != 'Mn'
+    )
 
+# 对英文转换为小写，去空格及非字母符号等处理
+def normalizeString(s):
+    s = unicodeToAscii(s.lower().strip())
+    s = re.sub(r"([.!?])", r" \1", s)   # 替换，goup(0)对应的是全部内容，goup(1)对应名字,goup(2)对应年龄
+    #s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
+    return s
+
+# 定义字典的存储数据结构
 class Lang:
     def __init__(self, name):
         self.name = name
         self.word2index = {}
         self.word2count = {}
-        self.index2word = {0: "SOS", 1: "EOS"}
-        self.n_words = 2  # Count SOS and EOS单词总量 初始化包含 SOS and EOS
-    #处理英文句子
-    def addSentence(self, sentence):
-        for word in sentence.split(' '):
-            self.addWord(word)
-    #处理中文句子
-    def addSentence_cn(self, sentence):
-        for word in list(jieba.cut(sentence)):
-            self.addWord(word)
-
+        self.index2word = {0: "BOS", 1: "EOS"}  # Begining Of Sequence, End Of Sequence
+        self.n_words = 2  # Count BOS and EOS单词总量 初始化包含 BOS and EOS
+    
     def addWord(self, word):
         if word not in self.word2index:
             self.word2index[word] = self.n_words
@@ -53,70 +83,48 @@ class Lang:
         else:
             self.word2count[word] += 1
 
-# 过滤并处理文本信息
+    #处理英文句子
+    def addSentence(self, sentence):
+        for word in sentence.split(' '):
+            self.addWord(word)
+    
+    #处理中文句子
+    def addSentence_cn(self, sentence):
+        for word in list(jieba.cut(sentence)):
+            self.addWord(word)
 
-#为了便于数据处理，把Unicode字符串转换为ASCII编码
-def unicodeToAscii(s):
-    return ''.join(
-        c for c in unicodedata.normalize('NFD', s)
-        if unicodedata.category(c) != 'Mn'
-    )
 
-# 对英文转换为小写，去空格及非字母符号等处理
-
-def normalizeString(s):
-    s = unicodeToAscii(s.lower().strip())
-    s = re.sub(r"([.!?])", r" \1", s)
-    #s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
-    return s
-
-#读数据，这里标签lang1,lang2作为参数，可提高模块通用性，可以进行多种语言的互译，只需修改数据文件及这两个参数即可
-def readLangs(lang1,lang2,reverse=False):
+# 读数据，这里标签lang1，lang2作为参数，可提高模块通用性，可以进行多种语言的互译，只需修改数据文件及这两个参数即可
+def readLangs(lang1, lang2, reverse=False):
     print("Reading lines...")
     #读文件，然后分成行
-    lines=open('%s-%s.txt' % (lang1, lang2), encoding='utf-8').\
-        read().strip().split('\n')
+    lines = open('%s-%s.txt' % (lang1, lang2), encoding='utf-8').read().strip().split('\n')
     #把行分成句子对，并进行规范化
-    pairs=[[normalizeString(s) for s in l.split('\t')] for l in lines]
+    pairs = [[normalizeString(s) for s in l.split('\t')] for l in lines]
     #判断是否需要转换语句的次序，如[英文，中文]转换为[中文，英文]次序
     if reverse:
         pairs=[list(reversed(p)) for p in pairs]
-        input_lang=Lang(lang2)
-        output_lang=Lang(lang1)
+        input_lang = Lang(lang2)
+        output_lang =Lang(lang1)
     else:
-        input_lang=Lang(lang1)
-        output_lang=Lang(lang2)
-    return input_lang,output_lang,pairs
-
-#为便于训练，这里选择部分数据
-MAX_LENGTH = 20
-
-eng_prefixes = (
-    "i am ", "i m ",
-    "he is", "he s ",
-    "she is", "she s ",
-    "you are", "you re ",
-    "we are", "we re ",
-    "they are", "they re "
-)
-
+        input_lang = Lang(lang1)
+        output_lang = Lang(lang2)
+    return input_lang, output_lang, pairs
 
 def filterPair(p, reverse):
-
     return len(p[0].split(' ')) < MAX_LENGTH and \
         len(p[1].split(' ')) < MAX_LENGTH and \
         p[1].startswith(eng_prefixes) if reverse else p[0].startswith(eng_prefixes)
 
-
 def filterPairs(pairs, reverse):
     return [pair for pair in pairs if filterPair(pair, reverse)]
 
-#把以上数据预处理函数，放在一起，实现对数据的预处理
-def prepareData(lang1,lang2,reverse=False):
-    input_lang,output_lang,pairs=readLangs(lang1,lang2,reverse)
+# 把以上数据预处理函数，放在一起，实现对数据的预处理
+def prepareData(lang1, lang2, reverse=False):
+    input_lang, output_lang, pairs = readLangs(lang1, lang2, reverse)
     
-    print('Read %s sentence pairs'% len(pairs))
-    pairs=filterPairs(pairs, reverse)
+    print('Read %s sentence pairs' % len(pairs))
+    pairs = filterPairs(pairs, reverse)
     print('Trimmed to %s sentence pairs' % len(pairs))
     print('Counting words...')
     for pair in pairs:
@@ -127,23 +135,17 @@ def prepareData(lang1,lang2,reverse=False):
             input_lang.addSentence(pair[0])
             output_lang.addSentence_cn(pair[1])
     print('Counted words:')
-    print(input_lang.name,input_lang.n_words)
-    print(output_lang.name,output_lang.n_words)
+    print(input_lang.name, input_lang.n_words)
+    print(output_lang.name, output_lang.n_words)
     return input_lang, output_lang, pairs
 
-#运行预处理函数
-reverse = False
-input_lang,output_lang,pairs=prepareData('eng','cmn', reverse)
-
-
-print('training...')
-
+### 训练时所用到的函数定义
 class EncoderRNN(nn.Module):
     def __init__(self, input_size, hidden_size):
         super(EncoderRNN, self).__init__()
         self.hidden_size = hidden_size
 
-        self.embedding = nn.Embedding(input_size, hidden_size)
+        self.embedding = nn.Embedding(input_size, hidden_size)  # 实现词与词向量的映射，通俗来讲就是将文字转换为一串数字，作为训练的一层
         self.gru = nn.GRU(hidden_size, hidden_size)
 
     def forward(self, input, hidden):
@@ -155,25 +157,6 @@ class EncoderRNN(nn.Module):
     def initHidden(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
 
-class DecoderRNN(nn.Module):
-    def __init__(self, hidden_size, output_size):
-        super(DecoderRNN, self).__init__()
-        self.hidden_size = hidden_size
-
-        self.embedding = nn.Embedding(output_size, hidden_size)
-        self.gru = nn.GRU(hidden_size, hidden_size)
-        self.out = nn.Linear(hidden_size, output_size)
-        self.softmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, input, hidden):
-        output = self.embedding(input).view(1, 1, -1)
-        output = F.relu(output)
-        output, hidden = self.gru(output, hidden)
-        output = self.softmax(self.out(output[0]))
-        return output, hidden
-
-    def initHidden(self):
-        return torch.zeros(1, 1, self.hidden_size, device=device)
 
 class AttnDecoderRNN(nn.Module):
     def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
@@ -194,10 +177,8 @@ class AttnDecoderRNN(nn.Module):
         embedded = self.embedding(input).view(1, 1, -1)
         embedded = self.dropout(embedded)
 
-        attn_weights = F.softmax(
-            self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
-        attn_applied = torch.bmm(attn_weights.unsqueeze(0),
-                                 encoder_outputs.unsqueeze(0))
+        attn_weights = F.softmax(self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)   # 利用一个全连接层，自动计算attention的权重
+        attn_applied = torch.bmm(attn_weights.unsqueeze(0), encoder_outputs.unsqueeze(0))
 
         output = torch.cat((embedded[0], attn_applied[0]), 1)
         output = self.attn_combine(output).unsqueeze(0)
@@ -210,24 +191,22 @@ class AttnDecoderRNN(nn.Module):
 
     def initHidden(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
-    
+
 def indexesFromSentence(lang, sentence):
     return [lang.word2index[word] for word in sentence.split(' ')]
 
 def indexesFromSentence_cn(lang, sentence):
     return [lang.word2index[word] for word in list(jieba.cut(sentence))]
 
-
 def tensorFromSentence(lang, sentence):
     indexes = indexesFromSentence(lang, sentence)
-    indexes.append(EOS_token)
+    indexes.append(EOS_token)   # 每个句子结尾要加EOS
     return torch.tensor(indexes, dtype=torch.long, device=device).view(-1, 1)
 
 def tensorFromSentence_cn(lang, sentence):
     indexes = indexesFromSentence_cn(lang, sentence)
     indexes.append(EOS_token)
     return torch.tensor(indexes, dtype=torch.long, device=device).view(-1, 1)
-
 
 def tensorsFromPair(pair, reverse):
     if reverse:
@@ -236,211 +215,123 @@ def tensorsFromPair(pair, reverse):
     else:
         input_tensor = tensorFromSentence(input_lang, pair[0])
         target_tensor = tensorFromSentence_cn(output_lang, pair[1])
-    return (input_tensor, target_tensor)
+    return (input_tensor, target_tensor, pair[0], pair[1])
 
-
-teacher_forcing_ratio = 0.5
 
 def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
-    encoder_hidden = encoder.initHidden()
+    encoder_hidden = encoder.initHidden()   # hidden state
+    input_length = input_tensor.size(0)
+    target_length = target_tensor.size(0)
+    loss = 0
 
+    encoder.zero_grad()
+    decoder.zero_grad()
     encoder_optimizer.zero_grad()
     decoder_optimizer.zero_grad()
 
-    input_length = input_tensor.size(0)
-    target_length = target_tensor.size(0)
-
+    # encoder
     encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
-
-    loss = 0
-
     for ei in range(input_length):
-        encoder_output, encoder_hidden = encoder(
-            input_tensor[ei], encoder_hidden)
+        encoder_output, encoder_hidden = encoder(input_tensor[ei], encoder_hidden)
         encoder_outputs[ei] = encoder_output[0, 0]
 
-    decoder_input = torch.tensor([[SOS_token]], device=device)
-
+    # decoder
+    decoder_input = torch.tensor([[BOS_token]], device=device)
     decoder_hidden = encoder_hidden
-
     use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
-
     if use_teacher_forcing:
         # Teacher forcing: Feed the target as the next input
         for di in range(target_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
+            decoder_output, decoder_hidden, decoder_attention = decoder(decoder_input, decoder_hidden, encoder_outputs)
             loss += criterion(decoder_output, target_tensor[di])
             decoder_input = target_tensor[di]  # Teacher forcing
-
     else:
         # Without teacher forcing: use its own predictions as the next input
         for di in range(target_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
-            topv, topi = decoder_output.topk(1)
+            decoder_output, decoder_hidden, decoder_attention = decoder(decoder_input, decoder_hidden, encoder_outputs)
+            topv, topi = decoder_output.topk(1)  # 返回最大的值及其位置下标
             decoder_input = topi.squeeze().detach()  # detach from history as input
-
             loss += criterion(decoder_output, target_tensor[di])
             if decoder_input.item() == EOS_token:
                 break
 
+    # backward
     loss.backward()
-
     encoder_optimizer.step()
     decoder_optimizer.step()
 
     return loss.item() / target_length
 
-import time
-import math
 
-def asMinutes(s):
-    m = math.floor(s / 60)
-    s -= m * 60
-    return '%dm %ds' % (m, s)
-
-
-def timeSince(since, percent):
-    now = time.time()
-    s = now - since
-    es = s / (percent)
-    rs = es - s
-    return '%s (- %s)' % (asMinutes(s), asMinutes(rs))
-
-def trainIters(encoder, decoder, n_iters, reverse, print_every=1000, plot_every=100, learning_rate=0.01):
-    start = time.time()
-    plot_losses = []
-    print_loss_total = 0  
-    plot_loss_total = 0 
-
-    encoder_optimizer = optim.SGD(encoder.parameters(), lr=learning_rate)
-    decoder_optimizer = optim.SGD(decoder.parameters(), lr=learning_rate)
-    training_pairs = [tensorsFromPair(random.choice(pairs), reverse)
-                      for i in range(n_iters)]
-    criterion = nn.NLLLoss()
-
-    for iter in range(1, n_iters + 1):
-        training_pair = training_pairs[iter - 1]
+def trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_pairs, writer, epoch, reverse):
+    for step, training_pair in enumerate(tqdm(train_pairs, desc=f'Epoch {epoch}')):
         input_tensor = training_pair[0]
         target_tensor = training_pair[1]
 
-        loss = train(input_tensor, target_tensor, encoder,
-                     decoder, encoder_optimizer, decoder_optimizer, criterion)
-        print_loss_total += loss
-        plot_loss_total += loss
-
-        if iter % print_every == 0:
-            print_loss_avg = print_loss_total / print_every
-            print_loss_total = 0
-            print('%s (%d %d%%) %.4f' % (timeSince(start, iter / n_iters),
-                                         iter, iter / n_iters * 100, print_loss_avg))
-
-        if iter % plot_every == 0:
-            plot_loss_avg = plot_loss_total / plot_every
-            plot_losses.append(plot_loss_avg)
-            plot_loss_total = 0
-
-    showPlot(plot_losses)
-
-import matplotlib.pyplot as plt
-
-#plt.switch_backend('agg')
-import matplotlib.ticker as ticker
-import numpy as np
+        loss = train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+        global_step = step + epoch * len(train_pairs)
+        writer.add_scalar("loss", loss, global_step=global_step)
 
 
-def showPlot(points):
-    plt.figure()
-    fig, ax = plt.subplots()
-    # this locator puts ticks at regular intervals
-    loc = ticker.MultipleLocator(base=0.2)
-    ax.yaxis.set_major_locator(loc)
-    plt.plot(points)
-
-def evaluate(encoder, decoder, sentence, reverse, max_length=MAX_LENGTH):
+### 可视化
+def evaluate(encoder, decoder, input_tensor, reverse, max_length=MAX_LENGTH):
     with torch.no_grad():
-        if reverse:
-            input_tensor = tensorFromSentence_cn(input_lang, sentence)
-        else:
-            input_tensor = tensorFromSentence(input_lang, sentence)
         input_length = input_tensor.size()[0]
         encoder_hidden = encoder.initHidden()
 
+        # encoder
         encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
-
         for ei in range(input_length):
-            encoder_output, encoder_hidden = encoder(input_tensor[ei],
-                                                     encoder_hidden)
+            encoder_output, encoder_hidden = encoder(input_tensor[ei],  encoder_hidden)
             encoder_outputs[ei] += encoder_output[0, 0]
 
-        decoder_input = torch.tensor([[SOS_token]], device=device)  # SOS
-
+        # decoder
+        decoder_input = torch.tensor([[BOS_token]], device=device)  # BOS
         decoder_hidden = encoder_hidden
-
         decoded_words = []
         decoder_attentions = torch.zeros(max_length, max_length)
-
         for di in range(max_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
-            decoder_attentions[di] = decoder_attention.data
-            topv, topi = decoder_output.data.topk(1)
-            if topi.item() == EOS_token:
+            decoder_output, decoder_hidden, decoder_attention = decoder(decoder_input, decoder_hidden, encoder_outputs)
+            decoder_attentions[di] = decoder_attention
+            topv, topi = decoder_output.topk(1)
+            decoder_input = topi.squeeze().detach()
+            if decoder_input.item() == EOS_token:
                 decoded_words.append('<EOS>')
                 break
             else:
-                decoded_words.append(output_lang.index2word[topi.item()])
-
-            decoder_input = topi.squeeze().detach()
+                decoded_words.append(output_lang.index2word[decoder_input.item()])
 
         return decoded_words, decoder_attentions[:di + 1]
-    
 
-def evaluateRandomly(encoder, decoder, n=10):
-    for i in range(n):
+def evaluateIters(encoder, decoder, test_pairs, reverse, max_length=MAX_LENGTH):
+    total_bleu = 0
+    for pair in test_pairs:
+        output_words, attentions = evaluate(
+            encoder, decoder, pair[0], reverse)
+        output_words.pop()
+        bleu_score = sentence_bleu([output_words], pair[3])
+        total_bleu += bleu_score
+    return total_bleu
+
+
+def evaluateRandomly(encoder, decoder, reverse, n=20):
+    for _ in range(n):
         pair = random.choice(pairs)
+        if reverse:
+            input_tensor = tensorFromSentence_cn(input_lang, pair[0])
+        else:
+            input_tensor = tensorFromSentence(input_lang, pair[0])
         print('>', pair[0])
         print('=', pair[1])
-        output_words, attentions = evaluate(encoder, decoder, pair[0], reverse)
-        output_sentence = ' '.join(output_words)
-        print('<', output_sentence)
-        print('')
-
-
-hidden_size = 256
-encoder1 = EncoderRNN(input_lang.n_words, hidden_size).to(device)
-attn_decoder1 = AttnDecoderRNN(hidden_size, output_lang.n_words, dropout_p=0.1).to(device)
-
-trainIters(encoder1, attn_decoder1, 75000, reverse, print_every=5000)
-
-evaluateRandomly(encoder1, attn_decoder1)
-
-def evaluate_randomly():
-    pair = random.choice(pairs)
-    
-    output_words, decoder_attn = evaluate(pair[0])
-    output_sentence = ' '.join(output_words)
-    
-    print('>', pair[0])
-    print('=', pair[1])
-    print('<', output_sentence)
-    print('')
-
-def evaluateRandomly(encoder, decoder, n=20):
-    for i in range(n):
-        pair = random.choice(pairs)
-        print('>', pair[0])
-        print('=', pair[1])
-        output_words, attentions = evaluate(encoder, decoder, pair[0], reverse)
+        output_words, attentions = evaluate(encoder, decoder, input_tensor, reverse)
         output_sentence = ' '.join(output_words)
         print('<', output_sentence)
         print('')
 
 def showAttention(input_sentence, output_words, attentions):
     # Set up figure with colorbar
-    plt.rcParams['font.sans-serif']=['SimHei']
-    plt.rcParams['axes.unicode_minus'] = False
+    # plt.rcParams['font.sans-serif']=['SimHei']
+    # plt.rcParams['axes.unicode_minus'] = False
     plt.clf()
     fig = plt.figure()
     ax = fig.add_subplot(111)
@@ -448,8 +339,7 @@ def showAttention(input_sentence, output_words, attentions):
     fig.colorbar(cax)
 
     # Set up axes
-    ax.set_xticklabels([''] + list(jieba.cut(input_sentence)) +
-                       ['<EOS>'], rotation=90)
+    ax.set_xticklabels([''] + list(jieba.cut(input_sentence)) + ['<EOS>'], rotation=90)
     ax.set_yticklabels([''] + output_words)
 
     # Show label at every tick
@@ -461,11 +351,97 @@ def showAttention(input_sentence, output_words, attentions):
     plt.savefig('result-%s.jpg' % input_sentence)
 
 def evaluateAndShowAttention(input_sentence):
+    if reverse:
+        input_tensor = tensorFromSentence_cn(input_lang, input_sentence)
+    else:
+        input_tensor = tensorFromSentence(input_lang, input_sentence)
     output_words, attentions = evaluate(
-        encoder1, attn_decoder1, input_sentence, reverse)
+        encoder, decoder, input_tensor, reverse)
     print('input =', input_sentence)
     print('output =', ' '.join(output_words))
     showAttention(input_sentence, output_words, attentions)
 
 
-evaluateAndShowAttention("i am happy")
+
+if __name__ == "__main__":
+    logdir = "results"  # 训练结果的保存路径
+    train_rate = 0.7    # 训练集:测试集 7:3
+    hidden_size = 512   
+    num_epochs = 75     # 训练轮次
+    save_epochs = 15    # 保存的代码轮次
+
+    ### 运行预处理函数
+    reverse = False
+    input_lang, output_lang, pairs = prepareData('eng', 'cmn', reverse)
+
+    ### 开始训练
+    print('training...')
+
+    learning_rate = 0.01
+    encoder = EncoderRNN(input_lang.n_words, hidden_size).to(device)
+    decoder = AttnDecoderRNN(hidden_size, output_lang.n_words, dropout_p=0.1).to(device)
+    encoder_optimizer = optim.SGD(encoder.parameters(), lr=learning_rate)
+    decoder_optimizer = optim.SGD(decoder.parameters(), lr=learning_rate)
+    criterion = nn.NLLLoss()    # 定义损失函数，输入是一个对数概率向量和一个目标标签，CrossEntropyLoss()=log_softmax() + NLLLoss() 
+
+    teacher_forcing_ratio = 0.5
+
+    train_pairs = [tensorsFromPair(pair, reverse) for pair in pairs[: int(len(pairs)*train_rate)]]
+    print(f"length of train pairs: {len(train_pairs)}")
+    test_pairs = [tensorsFromPair(pair, reverse) for pair in pairs[int(len(pairs)*train_rate):]]
+    print(f"length of test pairs: {len(test_pairs)}")
+
+    if reverse:
+        logdir = f"{logdir}/{output_lang.name}_{input_lang.name}_{MAX_LENGTH}length_{len(train_pairs)}train_{num_epochs}epochs_{hidden_size}size"
+    else:
+        logdir = f"{logdir}/{input_lang.name}_{output_lang.name}_{MAX_LENGTH}length_{len(train_pairs)}train_{num_epochs}epochs_{hidden_size}size"
+
+    print(logdir)
+
+    save_prefix = f"{logdir}/data"
+    os.makedirs(save_prefix)
+
+    writer = SummaryWriter(logdir=f"{logdir}/tb", flush_secs=30)  # SummaryWriter
+
+    best_bleu = 0
+    
+    for epoch in range(num_epochs):
+        trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_pairs, writer, epoch, reverse=reverse)
+
+        ### 保存模型
+        model_path = f"{save_prefix}/{epoch}.bin"
+        if (epoch + 1) % save_epochs == 0 or (epoch + 1) == num_epochs:
+            torch.save(
+                {
+                    "encoder_state_dict": encoder.state_dict(),
+                    "encoder_optimizer_state_dict": encoder_optimizer.state_dict(),
+                    "decoder_state_dict": decoder.state_dict(),
+                    "decoder_optimizer_state_dict": decoder_optimizer.state_dict(),
+                    "epoch": epoch,
+                },
+                model_path,
+            )
+
+        ### 测试模型
+        bleu = evaluateIters(encoder, decoder, test_pairs, reverse)
+        writer.add_scalar("test/bleu", bleu/len(test_pairs), global_step=epoch*len(train_pairs))
+        if bleu >= best_bleu:
+            best_bleu = bleu
+            model_path = f"{save_prefix}/best.bin"
+            
+            torch.save(
+                {
+                    "encoder_state_dict": encoder.state_dict(),
+                    "encoder_optimizer_state_dict": encoder_optimizer.state_dict(),
+                    "decoder_state_dict": decoder.state_dict(),
+                    "decoder_optimizer_state_dict": decoder_optimizer.state_dict(),
+                    "epoch": epoch,
+                },
+                model_path,
+            )
+            print(f"epoch:{epoch}\tbest_bleu: {best_bleu}")
+
+
+    ### 分析结果
+    evaluateRandomly(encoder, decoder, reverse)
+    evaluateAndShowAttention("i am happy")
