@@ -11,6 +11,7 @@ from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from nltk.translate.bleu_score import sentence_bleu
 import os
+import argparse
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -23,24 +24,67 @@ print(f"use {device}")
 BOS_token = 0
 EOS_token = 1
 
-# 为便于训练，这里选择部分数据
-MAX_LENGTH = 20  # 限制句子长度
-eng_prefixes = (
-    "i am ", "i'm ", 
-    "he is", "he's ", 
-    "she is", "she's ", 
-    "you are", "you're ", 
-    "we are", "we're ", 
-    "they are", "they're "
-) # 限制句子开头
+def get_parser() -> argparse.ArgumentParser:
+    """Return an argument parser"""
+    parser = argparse.ArgumentParser()
 
-# eng_prefixes = (
-#     "a", "b", "c", "d", "e", "f",
-#     "g", "h", "i", "j", "k", "l", 
-#     "m", "n", "o", "p", "q", "r",
-#     "s", "t", "u", "v", "w", "x",
-#     "y", "z", '"'
-#     ) # 不限制句子开头
+    parser.add_argument(
+        "--MAX_LENGTH",
+        default=20,
+        type=int,
+        help="the max length of instruction (default: 20)",
+    )
+    parser.add_argument(
+        "--all_data",
+        default=False,
+        action="store_true",
+        help="whether not to use all data (default: False)",
+    )
+    parser.add_argument(
+        "--num_epochs",
+        default=75,
+        type=int,
+        help="the num of train epochs (default: 75)",
+    )
+    parser.add_argument(
+        "--save_epochs",
+        default=15,
+        type=int,
+        help="the num of train epochs to save (default: 15)",
+    )
+    parser.add_argument(
+        "--hidden_size",
+        default=75,
+        type=int,
+        help="the size of hidden (default: 256)",
+    )
+    return parser
+
+parser = get_parser()
+args = parser.parse_args()
+
+# 为便于训练，这里选择部分数据
+MAX_LENGTH = args.MAX_LENGTH  # 限制句子长度
+
+if not args.all_data:
+    # 限制句子开头
+    eng_prefixes = (
+        "i am ", "i'm ", 
+        "he is", "he's ", 
+        "she is", "she's ", 
+        "you are", "you're ", 
+        "we are", "we're ", 
+        "they are", "they're "
+    )
+else:
+    # 不限制句子开头
+    eng_prefixes = (
+        "a", "b", "c", "d", "e", "f",
+        "g", "h", "i", "j", "k", "l", 
+        "m", "n", "o", "p", "q", "r",
+        "s", "t", "u", "v", "w", "x",
+        "y", "z", '"'
+    ) 
 
 
 ### 数据预处理的主要步骤包括：
@@ -114,7 +158,7 @@ def readLangs(lang1, lang2, reverse=False):
 def filterPair(p, reverse):
     return len(p[0].split(' ')) < MAX_LENGTH and \
         len(p[1].split(' ')) < MAX_LENGTH and \
-        p[1].startswith(eng_prefixes) if reverse else p[0].startswith(eng_prefixes)
+    (p[1].startswith(eng_prefixes) if reverse else p[0].startswith(eng_prefixes))
 
 def filterPairs(pairs, reverse):
     return [pair for pair in pairs if filterPair(pair, reverse)]
@@ -366,9 +410,9 @@ def evaluateAndShowAttention(input_sentence):
 if __name__ == "__main__":
     logdir = "results"  # 训练结果的保存路径
     train_rate = 0.7    # 训练集:测试集 7:3
-    hidden_size = 512   
-    num_epochs = 75     # 训练轮次
-    save_epochs = 15    # 保存的代码轮次
+    hidden_size = args.hidden_size 
+    num_epochs = args.num_epochs    # 训练轮次
+    save_epochs = args.save_epochs  # 保存的代码轮次
 
     ### 运行预处理函数
     reverse = False
@@ -399,7 +443,8 @@ if __name__ == "__main__":
     print(logdir)
 
     save_prefix = f"{logdir}/data"
-    os.makedirs(save_prefix)
+    if not os.path.exists(save_prefix):
+        os.makedirs(save_prefix)
 
     writer = SummaryWriter(logdir=f"{logdir}/tb", flush_secs=30)  # SummaryWriter
 
