@@ -12,6 +12,7 @@ from tensorboardX import SummaryWriter
 from nltk.translate.bleu_score import sentence_bleu
 import os
 import argparse
+from torch.utils.data import Dataset, RandomSampler, SequentialSampler, DataLoader
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -57,6 +58,12 @@ def get_parser() -> argparse.ArgumentParser:
         default=256,
         type=int,
         help="the size of hidden (default: 256)",
+    )
+    parser.add_argument(
+        "--num_workers",
+        default=3,
+        type=int,
+        help="the num of workers (default: 3)",
     )
     return parser
 
@@ -183,6 +190,48 @@ def prepareData(lang1, lang2, reverse=False):
     print(output_lang.name, output_lang.n_words)
     return input_lang, output_lang, pairs
 
+### 数据集
+def indexesFromSentence(lang, sentence):
+    return [lang.word2index[word] for word in sentence.split(' ')]
+
+def indexesFromSentence_cn(lang, sentence):
+    return [lang.word2index[word] for word in list(jieba.cut(sentence))]
+
+def tensorFromSentence(lang, sentence):
+    indexes = indexesFromSentence(lang, sentence)
+    indexes.append(EOS_token)   # 每个句子结尾要加EOS
+    return torch.tensor(indexes, dtype=torch.long).view(-1, 1)
+
+def tensorFromSentence_cn(lang, sentence):
+    indexes = indexesFromSentence_cn(lang, sentence)
+    indexes.append(EOS_token)
+    return torch.tensor(indexes, dtype=torch.long).view(-1, 1)
+
+def tensorsFromPair(pair, reverse):
+    if reverse:
+        input_tensor = tensorFromSentence_cn(input_lang, pair[0])
+        target_tensor = tensorFromSentence(output_lang, pair[1])
+    else:
+        input_tensor = tensorFromSentence(input_lang, pair[0])
+        target_tensor = tensorFromSentence_cn(output_lang, pair[1])
+    return (input_tensor, target_tensor, pair[0], pair[1])
+
+
+class PairsDataset(Dataset):
+    def __init__(
+        self,
+        pairs,
+        reverse,
+    ):
+        self.pairs = [tensorsFromPair(pair, reverse) for pair in pairs]
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, index: int):
+        return self.pairs[index]
+
+
 ### 训练时所用到的函数定义
 class EncoderRNN(nn.Module):
     def __init__(self, input_size, hidden_size):
@@ -236,31 +285,6 @@ class AttnDecoderRNN(nn.Module):
     def initHidden(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
 
-def indexesFromSentence(lang, sentence):
-    return [lang.word2index[word] for word in sentence.split(' ')]
-
-def indexesFromSentence_cn(lang, sentence):
-    return [lang.word2index[word] for word in list(jieba.cut(sentence))]
-
-def tensorFromSentence(lang, sentence):
-    indexes = indexesFromSentence(lang, sentence)
-    indexes.append(EOS_token)   # 每个句子结尾要加EOS
-    return torch.tensor(indexes, dtype=torch.long, device=device).view(-1, 1)
-
-def tensorFromSentence_cn(lang, sentence):
-    indexes = indexesFromSentence_cn(lang, sentence)
-    indexes.append(EOS_token)
-    return torch.tensor(indexes, dtype=torch.long, device=device).view(-1, 1)
-
-def tensorsFromPair(pair, reverse):
-    if reverse:
-        input_tensor = tensorFromSentence_cn(input_lang, pair[0])
-        target_tensor = tensorFromSentence(output_lang, pair[1])
-    else:
-        input_tensor = tensorFromSentence(input_lang, pair[0])
-        target_tensor = tensorFromSentence_cn(output_lang, pair[1])
-    return (input_tensor, target_tensor, pair[0], pair[1])
-
 
 def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
     encoder_hidden = encoder.initHidden()   # hidden state
@@ -308,9 +332,9 @@ def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, deco
 
 
 def trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_pairs, writer, epoch, reverse):
-    for step, training_pair in enumerate(tqdm(train_pairs, desc=f'Epoch {epoch}')):
-        input_tensor = training_pair[0]
-        target_tensor = training_pair[1]
+    for step, training_pair in enumerate(tqdm(train_pairs, desc=f'Train Epoch {epoch}')):
+        input_tensor = training_pair[0][0].to(device)
+        target_tensor = training_pair[1][0].to(device)
 
         loss = train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
         global_step = step + epoch * len(train_pairs)
@@ -350,8 +374,9 @@ def evaluate(encoder, decoder, input_tensor, reverse, max_length=MAX_LENGTH):
 def evaluateIters(encoder, decoder, test_pairs, reverse, max_length=MAX_LENGTH):
     total_bleu = 0
     for pair in test_pairs:
+        input_tensor = pair[0][0].to(device)
         output_words, attentions = evaluate(
-            encoder, decoder, pair[0], reverse)
+            encoder, decoder, input_tensor, reverse)
         output_words.pop()
         bleu_score = sentence_bleu([output_words], pair[3])
         total_bleu += bleu_score
@@ -430,15 +455,30 @@ if __name__ == "__main__":
 
     teacher_forcing_ratio = 0.5
 
-    train_pairs = [tensorsFromPair(pair, reverse) for pair in pairs[: int(len(pairs)*train_rate)]]
-    print(f"length of train pairs: {len(train_pairs)}")
-    test_pairs = [tensorsFromPair(pair, reverse) for pair in pairs[int(len(pairs)*train_rate):]]
-    print(f"length of test pairs: {len(test_pairs)}")
+    train_dataset = PairsDataset(pairs[: int(len(pairs)*train_rate)], reverse)
+    print(f"length of train pairs: {len(train_dataset)}")
+    test_dataset = PairsDataset(pairs[int(len(pairs)*train_rate): ], reverse)
+    print(f"length of test pairs: {len(test_dataset)}")
+    
+    train_data_loader = DataLoader(
+        train_dataset,
+        sampler=RandomSampler(train_dataset),
+        batch_size=1,   # 只考虑bs=1的情况
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+    test_data_loader = DataLoader(
+        test_dataset,
+        sampler=SequentialSampler(test_dataset),
+        batch_size=1,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
 
     if reverse:
-        logdir = f"{logdir}/{output_lang.name}_{input_lang.name}_{MAX_LENGTH}length_{len(train_pairs)}train_{num_epochs}epochs_{hidden_size}size"
+        logdir = f"{logdir}/{output_lang.name}_{input_lang.name}_{MAX_LENGTH}length_{len(train_data_loader)}train_{num_epochs}epochs_{hidden_size}size"
     else:
-        logdir = f"{logdir}/{input_lang.name}_{output_lang.name}_{MAX_LENGTH}length_{len(train_pairs)}train_{num_epochs}epochs_{hidden_size}size"
+        logdir = f"{logdir}/{input_lang.name}_{output_lang.name}_{MAX_LENGTH}length_{len(train_data_loader)}train_{num_epochs}epochs_{hidden_size}size"
 
     print(logdir)
 
@@ -451,7 +491,7 @@ if __name__ == "__main__":
     best_bleu = 0
     
     for epoch in range(num_epochs):
-        trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_pairs, writer, epoch, reverse=reverse)
+        trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_data_loader, writer, epoch, reverse=reverse)
 
         ### 保存模型
         model_path = f"{save_prefix}/{epoch}.bin"
@@ -468,11 +508,11 @@ if __name__ == "__main__":
             )
 
         ### 测试模型
-        bleu = evaluateIters(encoder, decoder, train_pairs, reverse)
-        writer.add_scalar("train/bleu", bleu/len(train_pairs), global_step=epoch*len(train_pairs))
+        bleu = evaluateIters(encoder, decoder, train_data_loader, reverse)
+        writer.add_scalar("train/bleu", bleu/len(train_data_loader), global_step=epoch*len(train_data_loader))
 
-        bleu = evaluateIters(encoder, decoder, test_pairs, reverse)
-        writer.add_scalar("val/bleu", bleu/len(test_pairs), global_step=epoch*len(train_pairs))
+        bleu = evaluateIters(encoder, decoder, test_data_loader, reverse)
+        writer.add_scalar("val/bleu", bleu/len(test_data_loader), global_step=epoch*len(test_data_loader))
 
         if bleu >= best_bleu:
             best_bleu = bleu
