@@ -50,11 +50,11 @@ def get_parser() -> argparse.ArgumentParser:
         "--save_epochs",
         default=25,
         type=int,
-        help="the num of train epochs to save (default: 15)",
+        help="the num of train epochs to save (default: 25)",
     )
     parser.add_argument(
         "--hidden_size",
-        default=75,
+        default=256,
         type=int,
         help="the size of hidden (default: 256)",
     )
