@@ -387,9 +387,9 @@ def evaluateRandomly(encoder, decoder, reverse, n=20):
     for _ in range(n):
         pair = random.choice(pairs)
         if reverse:
-            input_tensor = tensorFromSentence_cn(input_lang, pair[0])
+            input_tensor = tensorFromSentence_cn(input_lang, pair[0]).to(device)
         else:
-            input_tensor = tensorFromSentence(input_lang, pair[0])
+            input_tensor = tensorFromSentence(input_lang, pair[0]).to(device)
         print('>', pair[0])
         print('=', pair[1])
         output_words, attentions = evaluate(encoder, decoder, input_tensor, reverse)
@@ -421,9 +421,9 @@ def showAttention(input_sentence, output_words, attentions, logdir=""):
 
 def evaluateAndShowAttention(input_sentence, logdir=""):
     if reverse:
-        input_tensor = tensorFromSentence_cn(input_lang, input_sentence)
+        input_tensor = tensorFromSentence_cn(input_lang, input_sentence).to(device)
     else:
-        input_tensor = tensorFromSentence(input_lang, input_sentence)
+        input_tensor = tensorFromSentence(input_lang, input_sentence).to(device)
     output_words, attentions = evaluate(
         encoder, decoder, input_tensor, reverse)
     print('input =', input_sentence)
