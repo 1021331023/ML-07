@@ -16,7 +16,6 @@ from torch.utils.data import Dataset, RandomSampler, SequentialSampler, DataLoad
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-import numpy as np
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"use {device}")
@@ -378,7 +377,7 @@ def evaluateIters(encoder, decoder, test_pairs, reverse, max_length=MAX_LENGTH):
         output_words, attentions = evaluate(
             encoder, decoder, input_tensor, reverse)
         output_words.pop()
-        bleu_score = sentence_bleu([output_words], pair[3])
+        bleu_score = sentence_bleu([output_words], pair[3][0])
         total_bleu += bleu_score
     return total_bleu
 
@@ -399,8 +398,8 @@ def evaluateRandomly(encoder, decoder, reverse, n=20):
 
 def showAttention(input_sentence, output_words, attentions, logdir=""):
     # Set up figure with colorbar
-    # plt.rcParams['font.sans-serif']=['SimHei']
-    # plt.rcParams['axes.unicode_minus'] = False
+    plt.rcParams['font.sans-serif']=['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
     plt.clf()
     fig = plt.figure()
     ax = fig.add_subplot(111)
@@ -488,7 +487,8 @@ if __name__ == "__main__":
 
     writer = SummaryWriter(logdir=f"{logdir}/tb", flush_secs=30)  # SummaryWriter
 
-    best_bleu = 0
+    best_train_bleu = 0
+    best_test_bleu = 0
     
     for epoch in range(num_epochs):
         trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_data_loader, writer, epoch, reverse=reverse)
@@ -510,12 +510,8 @@ if __name__ == "__main__":
         ### 测试模型
         bleu = evaluateIters(encoder, decoder, train_data_loader, reverse)
         writer.add_scalar("train/bleu", bleu/len(train_data_loader), global_step=epoch*len(train_data_loader))
-
-        bleu = evaluateIters(encoder, decoder, test_data_loader, reverse)
-        writer.add_scalar("val/bleu", bleu/len(test_data_loader), global_step=epoch*len(test_data_loader))
-
-        if bleu >= best_bleu:
-            best_bleu = bleu
+        if bleu >= best_train_bleu:
+            best_train_bleu = bleu
             model_path = f"{save_prefix}/best.bin"
             
             torch.save(
@@ -528,7 +524,25 @@ if __name__ == "__main__":
                 },
                 model_path,
             )
-            print(f"epoch:{epoch}\tbest_bleu: {best_bleu}")
+
+        bleu = evaluateIters(encoder, decoder, test_data_loader, reverse)
+        writer.add_scalar("val/bleu", bleu/len(test_data_loader), global_step=epoch*len(test_data_loader))
+        if bleu >= best_test_bleu:
+            best_test_bleu = bleu
+            model_path = f"{save_prefix}/best.bin"
+            
+            torch.save(
+                {
+                    "encoder_state_dict": encoder.state_dict(),
+                    "encoder_optimizer_state_dict": encoder_optimizer.state_dict(),
+                    "decoder_state_dict": decoder.state_dict(),
+                    "decoder_optimizer_state_dict": decoder_optimizer.state_dict(),
+                    "epoch": epoch,
+                },
+                model_path,
+            )
+
+        print(f"epoch:{epoch}\tbest_train_bleu: {best_train_bleu}\tbest_test_bleu: {best_test_bleu}")
 
 
     ### 分析结果
