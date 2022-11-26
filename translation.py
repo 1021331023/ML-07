@@ -48,7 +48,7 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--save_epochs",
-        default=15,
+        default=25,
         type=int,
         help="the num of train epochs to save (default: 15)",
     )
@@ -372,7 +372,7 @@ def evaluateRandomly(encoder, decoder, reverse, n=20):
         print('<', output_sentence)
         print('')
 
-def showAttention(input_sentence, output_words, attentions):
+def showAttention(input_sentence, output_words, attentions, logdir=""):
     # Set up figure with colorbar
     # plt.rcParams['font.sans-serif']=['SimHei']
     # plt.rcParams['axes.unicode_minus'] = False
@@ -392,9 +392,9 @@ def showAttention(input_sentence, output_words, attentions):
 
     # plt.show()
     print(output_words)
-    plt.savefig('result-%s.jpg' % input_sentence)
+    plt.savefig(os.path.join(logdir, 'result-%s.jpg' % input_sentence))
 
-def evaluateAndShowAttention(input_sentence):
+def evaluateAndShowAttention(input_sentence, logdir=""):
     if reverse:
         input_tensor = tensorFromSentence_cn(input_lang, input_sentence)
     else:
@@ -403,7 +403,7 @@ def evaluateAndShowAttention(input_sentence):
         encoder, decoder, input_tensor, reverse)
     print('input =', input_sentence)
     print('output =', ' '.join(output_words))
-    showAttention(input_sentence, output_words, attentions)
+    showAttention(input_sentence, output_words, attentions, logdir)
 
 
 
@@ -468,8 +468,12 @@ if __name__ == "__main__":
             )
 
         ### 测试模型
+        bleu = evaluateIters(encoder, decoder, train_pairs, reverse)
+        writer.add_scalar("train/bleu", bleu/len(train_pairs), global_step=epoch*len(train_pairs))
+
         bleu = evaluateIters(encoder, decoder, test_pairs, reverse)
-        writer.add_scalar("test/bleu", bleu/len(test_pairs), global_step=epoch*len(train_pairs))
+        writer.add_scalar("val/bleu", bleu/len(test_pairs), global_step=epoch*len(train_pairs))
+
         if bleu >= best_bleu:
             best_bleu = bleu
             model_path = f"{save_prefix}/best.bin"
@@ -489,4 +493,4 @@ if __name__ == "__main__":
 
     ### 分析结果
     evaluateRandomly(encoder, decoder, reverse)
-    evaluateAndShowAttention("i am happy")
+    evaluateAndShowAttention("i am happy", logdir)
