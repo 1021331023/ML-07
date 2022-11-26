@@ -105,7 +105,7 @@ def unicodeToAscii(s):
 # 对英文转换为小写，去空格及非字母符号等处理
 def normalizeString(s):
     s = unicodeToAscii(s.lower().strip())
-    s = re.sub(r"([.!?])", r" \1", s)   # 替换，goup(0)对应的是全部内容，goup(1)对应名字,goup(2)对应年龄
+    s = re.sub(r"([.!?])", r" \1", s)   # 替换，相当于找到所有.?!，在前面加个空格
     #s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
     return s
 
