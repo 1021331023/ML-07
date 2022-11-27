@@ -16,6 +16,7 @@ from torch.utils.data import Dataset, RandomSampler, SequentialSampler, DataLoad
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import numpy as np
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"use {device}")
@@ -64,10 +65,21 @@ def get_parser() -> argparse.ArgumentParser:
         type=int,
         help="the num of workers (default: 3)",
     )
+    parser.add_argument(
+        "--seed",
+        default=1,
+        type=int,
+        help="the random (default: 1)",
+    )
     return parser
 
 parser = get_parser()
 args = parser.parse_args()
+
+### 固定随机种子
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+random.seed(args.seed)
 
 # 为便于训练，这里选择部分数据
 MAX_LENGTH = args.MAX_LENGTH  # 限制句子长度
@@ -377,7 +389,7 @@ def evaluateIters(encoder, decoder, test_pairs, reverse, max_length=MAX_LENGTH):
         output_words, attentions = evaluate(
             encoder, decoder, input_tensor, reverse)
         output_words.pop()
-        bleu_score = sentence_bleu([output_words], pair[3][0])
+        bleu_score = sentence_bleu([output_words], [word for word in list(jieba.cut(pair[3][0]))])
         total_bleu += bleu_score
     return total_bleu
 
