@@ -18,19 +18,16 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"use {device}")
-
 # 每个pair中，制作出中文和英文词典
-BOS_token = 0
-EOS_token = 1
+BOS_token = 0   # Begin Of Sentence
+EOS_token = 1   # End Of Sentence
 
 def get_parser() -> argparse.ArgumentParser:
     """Return an argument parser"""
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--MAX_LENGTH",
+        "--max_length",
         default=20,
         type=int,
         help="the max length of instruction (default: 20)",
@@ -71,38 +68,37 @@ def get_parser() -> argparse.ArgumentParser:
         type=int,
         help="the random (default: 1)",
     )
-    return parser
-
-parser = get_parser()
-args = parser.parse_args()
-
-### 固定随机种子
-torch.manual_seed(args.seed)
-np.random.seed(args.seed)
-random.seed(args.seed)
-
-# 为便于训练，这里选择部分数据
-MAX_LENGTH = args.MAX_LENGTH  # 限制句子长度
-
-if not args.all_data:
-    # 限制句子开头
-    eng_prefixes = (
-        "i am ", "i'm ", 
-        "he is", "he's ", 
-        "she is", "she's ", 
-        "you are", "you're ", 
-        "we are", "we're ", 
-        "they are", "they're "
+    parser.add_argument(
+        "--reverse",
+        default=False,
+        action="store_true",
+        help="whether not to reverse (default: False)",
     )
-else:
-    # 不限制句子开头
-    eng_prefixes = (
-        "a", "b", "c", "d", "e", "f",
-        "g", "h", "i", "j", "k", "l", 
-        "m", "n", "o", "p", "q", "r",
-        "s", "t", "u", "v", "w", "x",
-        "y", "z", '"'
-    ) 
+    parser.add_argument(
+        "--logdir",
+        default="results",
+        type=str,
+        help="the path to save data (default: 'results')",
+    )
+    parser.add_argument(
+        "--train_rate",
+        default=0.7,
+        type=float,
+        help="the rate to train (default: 0.7)",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        default=0.01,
+        type=float,
+        help="the learning rate (default: 0.01)",
+    )
+    parser.add_argument(
+        "--teacher_forcing_ratio",
+        default=0.5,
+        type=float,
+        help="the rate to use teacher forcing (default: 0.5)",
+    )
+    return parser
 
 
 ### 数据预处理的主要步骤包括：
@@ -127,7 +123,7 @@ def normalizeString(s):
     #s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
     return s
 
-# 定义字典的存储数据结构
+### 定义字典的存储数据结构
 class Lang:
     def __init__(self, name):
         self.name = name
@@ -156,7 +152,7 @@ class Lang:
             self.addWord(word)
 
 
-# 读数据，这里标签lang1，lang2作为参数，可提高模块通用性，可以进行多种语言的互译，只需修改数据文件及这两个参数即可
+### 读数据，这里标签lang1，lang2作为参数，可提高模块通用性，可以进行多种语言的互译，只需修改数据文件及这两个参数即可
 def readLangs(lang1, lang2, reverse=False):
     print("Reading lines...")
     #读文件，然后分成行
@@ -173,20 +169,20 @@ def readLangs(lang1, lang2, reverse=False):
         output_lang = Lang(lang2)
     return input_lang, output_lang, pairs
 
-def filterPair(p, reverse):
-    return len(p[0].split(' ')) < MAX_LENGTH and \
-        len(p[1].split(' ')) < MAX_LENGTH and \
+def filterPair(p, reverse, max_length, eng_prefixes):
+    return len(p[0].split(' ')) < max_length and \
+        len(p[1].split(' ')) < max_length and \
     (p[1].startswith(eng_prefixes) if reverse else p[0].startswith(eng_prefixes))
 
-def filterPairs(pairs, reverse):
-    return [pair for pair in pairs if filterPair(pair, reverse)]
+def filterPairs(pairs, reverse, max_length, eng_prefixes):
+    return [pair for pair in pairs if filterPair(pair, reverse, max_length, eng_prefixes)]
 
 # 把以上数据预处理函数，放在一起，实现对数据的预处理
-def prepareData(lang1, lang2, reverse=False):
+def prepareData(lang1, lang2, reverse, max_length, eng_prefixes):
     input_lang, output_lang, pairs = readLangs(lang1, lang2, reverse)
     
     print('Read %s sentence pairs' % len(pairs))
-    pairs = filterPairs(pairs, reverse)
+    pairs = filterPairs(pairs, reverse, max_length, eng_prefixes)
     print('Trimmed to %s sentence pairs' % len(pairs))
     print('Counting words...')
     for pair in pairs:
@@ -235,6 +231,7 @@ class PairsDataset(Dataset):
         reverse,
     ):
         self.pairs = [tensorsFromPair(pair, reverse) for pair in pairs]
+        self.reverse = reverse
 
     def __len__(self):
         return len(self.pairs)
@@ -263,7 +260,7 @@ class EncoderRNN(nn.Module):
 
 
 class AttnDecoderRNN(nn.Module):
-    def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
+    def __init__(self, hidden_size, output_size, max_length, dropout_p=0.1):
         super(AttnDecoderRNN, self).__init__()
         self.hidden_size = hidden_size
         self.output_size = output_size
@@ -297,7 +294,7 @@ class AttnDecoderRNN(nn.Module):
         return torch.zeros(1, 1, self.hidden_size, device=device)
 
 
-def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
+def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, teacher_forcing_ratio, device):    
     encoder_hidden = encoder.initHidden()   # hidden state
     input_length = input_tensor.size(0)
     target_length = target_tensor.size(0)
@@ -309,7 +306,7 @@ def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, deco
     decoder_optimizer.zero_grad()
 
     # encoder
-    encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
+    encoder_outputs = torch.zeros(decoder.max_length, encoder.hidden_size, device=device)
     for ei in range(input_length):
         encoder_output, encoder_hidden = encoder(input_tensor[ei], encoder_hidden)
         encoder_outputs[ei] = encoder_output[0, 0]
@@ -342,24 +339,25 @@ def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, deco
     return loss.item() / target_length
 
 
-def trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_pairs, writer, epoch, reverse):
+def trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_pairs, writer, epoch, teacher_forcing_ratio):
+    device = next(encoder.parameters()).device  # get the device id
     for step, training_pair in enumerate(tqdm(train_pairs, desc=f'Train Epoch {epoch}')):
         input_tensor = training_pair[0][0].to(device)
         target_tensor = training_pair[1][0].to(device)
 
-        loss = train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+        loss = train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, teacher_forcing_ratio, device)
         global_step = step + epoch * len(train_pairs)
         writer.add_scalar("loss", loss, global_step=global_step)
 
 
 ### 可视化
-def evaluate(encoder, decoder, input_tensor, reverse, max_length=MAX_LENGTH):
+def evaluate(encoder, decoder, input_tensor, device):
     with torch.no_grad():
         input_length = input_tensor.size()[0]
         encoder_hidden = encoder.initHidden()
 
         # encoder
-        encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
+        encoder_outputs = torch.zeros(decoder.max_length, encoder.hidden_size, device=device)
         for ei in range(input_length):
             encoder_output, encoder_hidden = encoder(input_tensor[ei],  encoder_hidden)
             encoder_outputs[ei] += encoder_output[0, 0]
@@ -368,8 +366,8 @@ def evaluate(encoder, decoder, input_tensor, reverse, max_length=MAX_LENGTH):
         decoder_input = torch.tensor([[BOS_token]], device=device)  # BOS
         decoder_hidden = encoder_hidden
         decoded_words = []
-        decoder_attentions = torch.zeros(max_length, max_length)
-        for di in range(max_length):
+        decoder_attentions = torch.zeros(decoder.max_length, decoder.max_length)
+        for di in range(decoder.max_length):
             decoder_output, decoder_hidden, decoder_attention = decoder(decoder_input, decoder_hidden, encoder_outputs)
             decoder_attentions[di] = decoder_attention
             topv, topi = decoder_output.topk(1)
@@ -382,19 +380,28 @@ def evaluate(encoder, decoder, input_tensor, reverse, max_length=MAX_LENGTH):
 
         return decoded_words, decoder_attentions[:di + 1]
 
-def evaluateIters(encoder, decoder, test_pairs, reverse, max_length=MAX_LENGTH):
+
+def evaluateIters(encoder, decoder, test_pairs, reverse):
+    device = next(encoder.parameters()).device  # get the device id
     total_bleu = 0
+
     for pair in test_pairs:
         input_tensor = pair[0][0].to(device)
         output_words, attentions = evaluate(
-            encoder, decoder, input_tensor, reverse)
+            encoder, decoder, input_tensor, device)
         output_words.pop()
-        bleu_score = sentence_bleu([output_words], [word for word in list(jieba.cut(pair[3][0]))])
+        if reverse:
+            groudtruth = pair[3][0].split(" ")
+        else:
+            groudtruth = [word for word in list(jieba.cut(pair[3][0]))]
+        bleu_score = sentence_bleu([output_words], groudtruth)
         total_bleu += bleu_score
     return total_bleu
 
 
 def evaluateRandomly(encoder, decoder, reverse, n=20):
+    device = next(encoder.parameters()).device  # get the device id
+
     for _ in range(n):
         pair = random.choice(pairs)
         if reverse:
@@ -403,10 +410,11 @@ def evaluateRandomly(encoder, decoder, reverse, n=20):
             input_tensor = tensorFromSentence(input_lang, pair[0]).to(device)
         print('>', pair[0])
         print('=', pair[1])
-        output_words, attentions = evaluate(encoder, decoder, input_tensor, reverse)
+        output_words, attentions = evaluate(encoder, decoder, input_tensor, device)
         output_sentence = ' '.join(output_words)
         print('<', output_sentence)
         print('')
+
 
 def showAttention(input_sentence, output_words, attentions, logdir=""):
     # Set up figure with colorbar
@@ -430,13 +438,14 @@ def showAttention(input_sentence, output_words, attentions, logdir=""):
     print(output_words)
     plt.savefig(os.path.join(logdir, 'result-%s.jpg' % input_sentence))
 
-def evaluateAndShowAttention(input_sentence, logdir=""):
+
+def evaluateAndShowAttention(input_sentence, encoder, decoder, reverse, logdir=""):
+    device = next(encoder.parameters()).device  # get the device id
     if reverse:
         input_tensor = tensorFromSentence_cn(input_lang, input_sentence).to(device)
     else:
         input_tensor = tensorFromSentence(input_lang, input_sentence).to(device)
-    output_words, attentions = evaluate(
-        encoder, decoder, input_tensor, reverse)
+    output_words, attentions = evaluate(encoder, decoder, input_tensor, device)
     print('input =', input_sentence)
     print('output =', ' '.join(output_words))
     showAttention(input_sentence, output_words, attentions, logdir)
@@ -444,31 +453,54 @@ def evaluateAndShowAttention(input_sentence, logdir=""):
 
 
 if __name__ == "__main__":
-    logdir = "results"  # 训练结果的保存路径
-    train_rate = 0.7    # 训练集:测试集 7:3
-    hidden_size = args.hidden_size 
-    num_epochs = args.num_epochs    # 训练轮次
-    save_epochs = args.save_epochs  # 保存的代码轮次
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"use {device}")
 
+    parser = get_parser()
+    args = parser.parse_args()
+
+    ### 固定随机种子
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+
+    # 为便于训练，这里选择部分数据
+    if not args.all_data:
+        # 限制句子开头
+        eng_prefixes = (
+            "i am ", "i'm ", 
+            "he is", "he's ", 
+            "she is", "she's ", 
+            "you are", "you're ", 
+            "we are", "we're ", 
+            "they are", "they're "
+        )
+    else:
+        # 不限制句子开头
+        eng_prefixes = (
+            "a", "b", "c", "d", "e", "f",
+            "g", "h", "i", "j", "k", "l", 
+            "m", "n", "o", "p", "q", "r",
+            "s", "t", "u", "v", "w", "x",
+            "y", "z", '"'
+        ) 
+
+    
     ### 运行预处理函数
-    reverse = False
-    input_lang, output_lang, pairs = prepareData('eng', 'cmn', reverse)
+    input_lang, output_lang, pairs = prepareData('eng', 'cmn', args.reverse, args.max_length, eng_prefixes)
 
     ### 开始训练
     print('training...')
 
-    learning_rate = 0.01
-    encoder = EncoderRNN(input_lang.n_words, hidden_size).to(device)
-    decoder = AttnDecoderRNN(hidden_size, output_lang.n_words, dropout_p=0.1).to(device)
-    encoder_optimizer = optim.SGD(encoder.parameters(), lr=learning_rate)
-    decoder_optimizer = optim.SGD(decoder.parameters(), lr=learning_rate)
+    encoder = EncoderRNN(input_lang.n_words, args.hidden_size).to(device)
+    decoder = AttnDecoderRNN(args.hidden_size, output_lang.n_words, max_length=args.max_length, dropout_p=0.1).to(device)
+    encoder_optimizer = optim.SGD(encoder.parameters(), lr=args.learning_rate)
+    decoder_optimizer = optim.SGD(decoder.parameters(), lr=args.learning_rate)
     criterion = nn.NLLLoss()    # 定义损失函数，输入是一个对数概率向量和一个目标标签，CrossEntropyLoss()=log_softmax() + NLLLoss() 
 
-    teacher_forcing_ratio = 0.5
-
-    train_dataset = PairsDataset(pairs[: int(len(pairs)*train_rate)], reverse)
+    train_dataset = PairsDataset(pairs[: int(len(pairs)*args.train_rate)], args.reverse)
     print(f"length of train pairs: {len(train_dataset)}")
-    test_dataset = PairsDataset(pairs[int(len(pairs)*train_rate): ], reverse)
+    test_dataset = PairsDataset(pairs[int(len(pairs)*args.train_rate): ], args.reverse)
     print(f"length of test pairs: {len(test_dataset)}")
     
     train_data_loader = DataLoader(
@@ -486,13 +518,10 @@ if __name__ == "__main__":
         pin_memory=True,
     )
 
-    if reverse:
-        logdir = f"{logdir}/{output_lang.name}_{input_lang.name}_{MAX_LENGTH}length_{len(train_data_loader)}train_{num_epochs}epochs_{hidden_size}size"
-    else:
-        logdir = f"{logdir}/{input_lang.name}_{output_lang.name}_{MAX_LENGTH}length_{len(train_data_loader)}train_{num_epochs}epochs_{hidden_size}size"
-
+    logdir = f"{args.logdir}/{input_lang.name}_{output_lang.name}_{args.max_length}length_{len(train_data_loader)}train_{args.num_epochs}epochs_{args.hidden_size}size"
     print(logdir)
 
+    # the path to save models
     save_prefix = f"{logdir}/data"
     if not os.path.exists(save_prefix):
         os.makedirs(save_prefix)
@@ -502,12 +531,12 @@ if __name__ == "__main__":
     best_train_bleu = 0
     best_test_bleu = 0
     
-    for epoch in range(num_epochs):
-        trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_data_loader, writer, epoch, reverse=reverse)
+    for epoch in range(args.num_epochs):
+        trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_data_loader, writer, epoch, args.teacher_forcing_ratio)
 
         ### 保存模型
         model_path = f"{save_prefix}/{epoch}.bin"
-        if (epoch + 1) % save_epochs == 0 or (epoch + 1) == num_epochs:
+        if (epoch + 1) % args.save_epochs == 0 or (epoch + 1) == args.num_epochs:
             torch.save(
                 {
                     "encoder_state_dict": encoder.state_dict(),
@@ -520,8 +549,8 @@ if __name__ == "__main__":
             )
 
         ### 测试模型
-        bleu = evaluateIters(encoder, decoder, train_data_loader, reverse)
-        writer.add_scalar("train/bleu", bleu/len(train_data_loader), global_step=epoch*len(train_data_loader))
+        bleu = evaluateIters(encoder, decoder, train_data_loader, args.reverse)/len(train_data_loader)
+        writer.add_scalar("train/bleu", bleu, global_step=epoch*len(train_data_loader))
         if bleu >= best_train_bleu:
             best_train_bleu = bleu
             model_path = f"{save_prefix}/best.bin"
@@ -537,8 +566,8 @@ if __name__ == "__main__":
                 model_path,
             )
 
-        bleu = evaluateIters(encoder, decoder, test_data_loader, reverse)
-        writer.add_scalar("val/bleu", bleu/len(test_data_loader), global_step=epoch*len(test_data_loader))
+        bleu = evaluateIters(encoder, decoder, test_data_loader, args.reverse)/len(test_data_loader)
+        writer.add_scalar("val/bleu", bleu, global_step=epoch*len(test_data_loader))
         if bleu >= best_test_bleu:
             best_test_bleu = bleu
             model_path = f"{save_prefix}/best.bin"
@@ -558,5 +587,6 @@ if __name__ == "__main__":
 
 
     ### 分析结果
-    evaluateRandomly(encoder, decoder, reverse)
-    evaluateAndShowAttention("i am happy", logdir)
+    evaluateRandomly(encoder, decoder, args.reverse, 20)
+    testsentence = "我很高兴" if args.reverse else "i am happy"
+    evaluateAndShowAttention(testsentence, encoder, decoder, args.reverse, logdir)
