@@ -597,5 +597,5 @@ if __name__ == "__main__":
 
     ### 分析结果
     evaluateRandomly(encoder, decoder, args.reverse, 20)
-    testsentence = "我很高兴。" if args.reverse else "i am happy."
+    testsentence = "我很高兴。" if args.reverse else "i am happy ."
     evaluateAndShowAttention(testsentence, encoder, decoder, args.reverse, logdir)
