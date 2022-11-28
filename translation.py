@@ -76,7 +76,7 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--logdir",
-        default="results-new",
+        default="results",
         type=str,
         help="the path to save data (default: 'results')",
     )
@@ -170,9 +170,14 @@ def readLangs(lang1, lang2, reverse=False):
     return input_lang, output_lang, pairs
 
 def filterPair(p, reverse, max_length, eng_prefixes):
-    return (len(p[0].split(' ')) < max_length) and \
-        (len(p[1].split(' ')) < max_length) and \
-    (p[1].startswith(eng_prefixes) if reverse else p[0].startswith(eng_prefixes))
+    if reverse:
+        return (len(list(jieba.cut(p[0]))) < max_length) and \
+            (len(p[1].split(' ')) < max_length) and \
+            p[1].startswith(eng_prefixes)
+    else:
+        return (len(p[0].split(' ')) < max_length) and \
+            (len(list(jieba.cut(p[1]))) < max_length) and \
+            p[0].startswith(eng_prefixes)
 
 def filterPairs(pairs, reverse, max_length, eng_prefixes):
     return [pair for pair in pairs if filterPair(pair, reverse, max_length, eng_prefixes)]
