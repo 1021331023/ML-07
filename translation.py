@@ -170,8 +170,8 @@ def readLangs(lang1, lang2, reverse=False):
     return input_lang, output_lang, pairs
 
 def filterPair(p, reverse, max_length, eng_prefixes):
-    return len(p[0].split(' ')) < max_length and \
-        len(p[1].split(' ')) < max_length and \
+    return (len(p[0].split(' ')) < max_length) and \
+        (len(p[1].split(' ')) < max_length) and \
     (p[1].startswith(eng_prefixes) if reverse else p[0].startswith(eng_prefixes))
 
 def filterPairs(pairs, reverse, max_length, eng_prefixes):
@@ -341,6 +341,8 @@ def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, deco
 
 def trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, train_pairs, writer, epoch, teacher_forcing_ratio):
     device = next(encoder.parameters()).device  # get the device id
+    encoder.train()  # train mode (dropout and batchnorm is used)
+    decoder.train()  # train mode (dropout and batchnorm is used)
     for step, training_pair in enumerate(tqdm(train_pairs, desc=f'Train Epoch {epoch}')):
         input_tensor = training_pair[0][0].to(device)
         target_tensor = training_pair[1][0].to(device)
@@ -383,6 +385,8 @@ def evaluate(encoder, decoder, input_tensor, device):
 
 def evaluateIters(encoder, decoder, test_pairs, reverse):
     device = next(encoder.parameters()).device  # get the device id
+    encoder.eval()  # eval mode (dropout and batchnorm is not used)
+    decoder.eval()  # eval mode (dropout and batchnorm is not used)
     total_bleu = 0
 
     for pair in test_pairs:
@@ -483,7 +487,7 @@ if __name__ == "__main__":
             "m", "n", "o", "p", "q", "r",
             "s", "t", "u", "v", "w", "x",
             "y", "z", '"'
-        ) 
+        )
 
     
     ### 运行预处理函数
