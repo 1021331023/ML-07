@@ -355,6 +355,8 @@ def trainIters(encoder, decoder, encoder_optimizer, decoder_optimizer, criterion
         loss = train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, teacher_forcing_ratio, device)
         global_step = step + epoch * len(train_pairs)
         writer.add_scalar("loss", loss, global_step=global_step)
+        writer.add_scalar('learning_rate/encoder', encoder_optimizer.param_groups[0]['lr'], epoch)
+        writer.add_scalar('learning_rate/decoder', decoder_optimizer.param_groups[0]['lr'], epoch)
 
 
 ### 可视化
@@ -408,7 +410,7 @@ def evaluateIters(encoder, decoder, test_pairs, reverse):
     return total_bleu
 
 
-def evaluateRandomly(encoder, decoder, reverse, n=20):
+def evaluateRandomly(encoder, decoder, pairs, reverse, n=20):
     device = next(encoder.parameters()).device  # get the device id
 
     for _ in range(n):
@@ -498,14 +500,8 @@ if __name__ == "__main__":
     ### 运行预处理函数
     input_lang, output_lang, pairs = prepareData('eng', 'cmn', args.reverse, args.max_length, eng_prefixes)
 
-    ### 开始训练
-    print('training...')
-
-    encoder = EncoderRNN(input_lang.n_words, args.hidden_size).to(device)
-    decoder = AttnDecoderRNN(args.hidden_size, output_lang.n_words, max_length=args.max_length, dropout_p=0.1).to(device)
-    encoder_optimizer = optim.SGD(encoder.parameters(), lr=args.learning_rate)
-    decoder_optimizer = optim.SGD(decoder.parameters(), lr=args.learning_rate)
-    criterion = nn.NLLLoss()    # 定义损失函数，输入是一个对数概率向量和一个目标标签，CrossEntropyLoss()=log_softmax() + NLLLoss() 
+    ### 数据集
+    random.shuffle(pairs)   # 打乱数据集
 
     train_dataset = PairsDataset(pairs[: int(len(pairs)*args.train_rate)], args.reverse)
     print(f"length of train pairs: {len(train_dataset)}")
@@ -537,6 +533,15 @@ if __name__ == "__main__":
 
     writer = SummaryWriter(logdir=f"{logdir}/tb", flush_secs=30)  # SummaryWriter
 
+    ### 开始训练
+    print('training...')
+
+    encoder = EncoderRNN(input_lang.n_words, args.hidden_size).to(device)
+    decoder = AttnDecoderRNN(args.hidden_size, output_lang.n_words, max_length=args.max_length, dropout_p=0.1).to(device)
+    encoder_optimizer = optim.SGD(encoder.parameters(), lr=args.learning_rate)
+    decoder_optimizer = optim.SGD(decoder.parameters(), lr=args.learning_rate)
+    criterion = nn.NLLLoss()    # 定义损失函数，输入是一个对数概率向量和一个目标标签，CrossEntropyLoss()=log_softmax() + NLLLoss() 
+    
     best_train_bleu = 0
     best_test_bleu = 0
     
@@ -596,6 +601,6 @@ if __name__ == "__main__":
 
 
     ### 分析结果
-    evaluateRandomly(encoder, decoder, args.reverse, 20)
+    evaluateRandomly(encoder, decoder, pairs, args.reverse, 20)
     testsentence = "我很高兴。" if args.reverse else "i am happy ."
     evaluateAndShowAttention(testsentence, encoder, decoder, args.reverse, logdir)
